@@ -1,0 +1,242 @@
+/*
+ * Bird Feeder Camera - WiFi Photo Burst Mode (Deep Sleep)
+ * Battery optimized with Serial1 debug output
+ * 
+ * Serial1 Output: TX on GPIO 43 (connect USB-Serial adapter to view)
+ * 
+ * UPDATE THESE:
+ * - WiFi credentials (lines 38-39)
+ * - Server URL (line 42)
+ */
+
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "esp_sleep.h"
+#include "esp_wifi.h"
+#include "esp_bt.h"
+#include "driver/gpio.h"
+
+// Camera pins
+#define PWDN_GPIO_NUM     -1
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM     10
+#define SIOD_GPIO_NUM     40
+#define SIOC_GPIO_NUM     39
+#define Y9_GPIO_NUM       48
+#define Y8_GPIO_NUM       11
+#define Y7_GPIO_NUM       12
+#define Y6_GPIO_NUM       14
+#define Y5_GPIO_NUM       16
+#define Y4_GPIO_NUM       18
+#define Y3_GPIO_NUM       17
+#define Y2_GPIO_NUM       15
+#define VSYNC_GPIO_NUM    38
+#define HREF_GPIO_NUM     47
+#define PCLK_GPIO_NUM     13
+
+#define IR_SENSOR_PIN 2
+
+// UPDATE THESE
+const char* ssid = "YOUR_WIFI_NAME";
+const char* password = "YOUR_WIFI_PASSWORD";
+const char* serverUrl = "http://192.168.1.100:5000/upload";
+
+const int PHOTOS_PER_BURST = 5;
+const int PHOTO_INTERVAL = 5000;
+
+RTC_DATA_ATTR int burstCount = 0;
+
+void setup() {
+  Serial1.begin(115200, SERIAL_8N1, 44, 43);
+  delay(100);
+  
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial1.println("\n🔔 Woke from motion!");
+  } else {
+    Serial1.println("\n⚡ Power on");
+  }
+  
+  if (!initCamera()) {
+    Serial1.println("✗ Camera failed!");
+    goToSleep();
+    return;
+  }
+  Serial1.println("✓ Camera ready");
+  
+  if (!connectWiFi()) {
+    Serial1.println("✗ WiFi failed!");
+    goToSleep();
+    return;
+  }
+  Serial1.println("✓ WiFi connected");
+  
+  capturePhotoBurst();
+  goToSleep();
+}
+
+void loop() {
+  Serial1.println("⚠ ERROR: Should not be in loop!");
+  delay(1000);
+}
+
+bool initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+  
+  return (esp_camera_init(&config) == ESP_OK);
+}
+
+bool connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    delay(500);
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial1.print("IP: ");
+    Serial1.println(WiFi.localIP());
+    return true;
+  }
+  return false;
+}
+
+void capturePhotoBurst() {
+  Serial1.printf("\n📸 Burst #%d\n", burstCount);
+  
+  for (int i = 0; i < PHOTOS_PER_BURST; i++) {
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial1.printf("✗ Photo %d failed\n", i + 1);
+      delay(PHOTO_INTERVAL);
+      continue;
+    }
+    
+    String filename = "bird_" + String(burstCount) + "_photo" + String(i + 1) + ".jpg";
+    
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.setTimeout(15000);
+    http.addHeader("Content-Type", "image/jpeg");
+    http.addHeader("X-Filename", filename);
+    
+    int httpCode = http.POST(fb->buf, fb->len);
+    
+    if (httpCode == 200) {
+      Serial1.printf("✓ Photo %d/%d\n", i + 1, PHOTOS_PER_BURST);
+    } else {
+      Serial1.printf("✗ Upload failed (%d)\n", httpCode);
+    }
+    
+    http.end();
+    esp_camera_fb_return(fb);
+    
+    if (i < PHOTOS_PER_BURST - 1) {
+      delay(PHOTO_INTERVAL);
+    }
+  }
+  
+  Serial1.println("✓ Burst complete");
+  burstCount++;
+}
+
+void goToSleep() {
+  Serial1.println("\n💤 Preparing sleep...");
+  
+  // Wait longer for sensor to return to HIGH (idle)
+  Serial1.print("Waiting for sensor idle (current: ");
+  Serial1.print(digitalRead(IR_SENSOR_PIN) == HIGH ? "HIGH" : "LOW");
+  Serial1.print(")...");
+  
+  int timeout = 0;
+  while (digitalRead(IR_SENSOR_PIN) == LOW && timeout < 200) {  // Increased to 20 seconds
+    delay(100);
+    if (timeout % 10 == 0) Serial1.print(".");
+    timeout++;
+  }
+  
+  Serial1.println();
+  Serial1.print("Sensor now: ");
+  Serial1.println(digitalRead(IR_SENSOR_PIN) == HIGH ? "HIGH" : "LOW");
+  
+  if (digitalRead(IR_SENSOR_PIN) == HIGH) {
+    Serial1.println("✓ Sensor idle - wake on motion");
+    // Wake when IR sensor goes LOW (motion)
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)IR_SENSOR_PIN, 0);
+  } else {
+    Serial1.println("✗ Sensor stuck LOW - CHECK WIRING!");
+    Serial1.println("Using 60s timer instead");
+    // Sensor problem - use timer
+    esp_sleep_enable_timer_wakeup(60 * 1000000ULL);
+  }
+  
+  // Disable all peripherals to save power
+  Serial1.println("Powering down peripherals...");
+  
+  // Turn off camera completely
+  esp_camera_deinit();
+  
+  // Configure GPIO for lowest power
+  // Set all camera pins to input with pulldown to prevent floating
+  gpio_set_direction((gpio_num_t)Y2_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y3_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y4_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y5_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y6_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y7_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y8_GPIO_NUM, GPIO_MODE_INPUT);
+  gpio_set_direction((gpio_num_t)Y9_GPIO_NUM, GPIO_MODE_INPUT);
+  
+  gpio_pulldown_en((gpio_num_t)Y2_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y3_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y4_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y5_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y6_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y7_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y8_GPIO_NUM);
+  gpio_pulldown_en((gpio_num_t)Y9_GPIO_NUM);
+  
+  // Turn off WiFi and Bluetooth completely
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  btStop();
+  
+  Serial1.println("💤 Entering deep sleep NOW\n");
+  Serial1.flush();
+  
+  delay(100);
+  
+  // DEEP SLEEP
+  esp_deep_sleep_start();
+}

@@ -1,0 +1,239 @@
+/*
+ * Bird Feeder Camera - SD Card Mode
+ * Records to SD card only - no WiFi needed
+ * 
+ * Setup Instructions:
+ * 1. Insert microSD card (FAT32 formatted, 8-32GB)
+ * 2. Arduino IDE: Enable "OPI PSRAM" and "USB CDC On Boot"
+ * 3. Upload code
+ * 4. Remove SD card to view videos on PC with VLC
+ */
+
+#include "esp_camera.h"
+#include "SD.h"
+#include "SPI.h"
+#include "FS.h"
+
+// Camera pins for XIAO ESP32-S3 Sense
+#define PWDN_GPIO_NUM     -1
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM     10
+#define SIOD_GPIO_NUM     40
+#define SIOC_GPIO_NUM     39
+#define Y9_GPIO_NUM       48
+#define Y8_GPIO_NUM       11
+#define Y7_GPIO_NUM       12
+#define Y6_GPIO_NUM       14
+#define Y5_GPIO_NUM       16
+#define Y4_GPIO_NUM       18
+#define Y3_GPIO_NUM       17
+#define Y2_GPIO_NUM       15
+#define VSYNC_GPIO_NUM    38
+#define HREF_GPIO_NUM     47
+#define PCLK_GPIO_NUM     13
+
+// SD Card SPI pins
+#define SD_CS 21
+#define SD_MOSI 9
+#define SD_MISO 8
+#define SD_SCK 7
+
+// IR Sensor Pin
+#define IR_SENSOR_PIN 2
+
+// Recording settings
+const int VIDEO_DURATION = 10000;  // 10 seconds
+const int FRAME_DELAY = 100;       // 100ms = 10 fps
+
+File videoFile;
+int videoCount = 0;
+bool isRecording = false;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  Serial.println("\n=== Bird Feeder Camera - SD Card Mode ===\n");
+  
+  pinMode(IR_SENSOR_PIN, INPUT_PULLDOWN);
+  
+  if (!initCamera()) {
+    Serial.println("✗ Camera failed!");
+    return;
+  }
+  Serial.println("✓ Camera ready");
+  
+  if (!initSDCard()) {
+    Serial.println("✗ SD Card failed!");
+    Serial.println("→ Insert SD card and press reset");
+    return;
+  }
+  Serial.println("✓ SD Card ready");
+  
+  countExistingVideos();
+  
+  Serial.println("\n=== Ready to Record ===");
+  Serial.println("Videos save to SD card\n");
+}
+
+void loop() {
+  // Test mode: capture every 15 seconds
+  static unsigned long lastCapture = 0;
+  
+  if (!isRecording && millis() - lastCapture > 15000) {
+    Serial.println("→ Test capture (15s timer)");
+    lastCapture = millis();
+    recordVideo();
+  }
+  
+  delay(100);
+  
+  /* MOTION SENSOR MODE - Uncomment when sensor is ready:
+  
+  if (!isRecording) {
+    int sensorValue = digitalRead(IR_SENSOR_PIN);
+    
+    if (sensorValue == LOW) {  // HW-201 may be inverted
+      Serial.println("→ Motion detected!");
+      recordVideo();
+      delay(2000);
+    }
+  }
+  delay(100);
+  
+  */
+}
+
+bool initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+  
+  if (esp_camera_init(&config) != ESP_OK) {
+    return false;
+  }
+  
+  return true;
+}
+
+bool initSDCard() {
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  
+  if (!SD.begin(SD_CS)) {
+    Serial.println("SD mount failed");
+    return false;
+  }
+  
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("No SD card");
+    return false;
+  }
+  
+  Serial.print("SD Type: ");
+  if(cardType == CARD_MMC) Serial.println("MMC");
+  else if(cardType == CARD_SD) Serial.println("SD");
+  else if(cardType == CARD_SDHC) Serial.println("SDHC");
+  
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Size: %llu MB\n", cardSize);
+  Serial.printf("Used: %llu MB\n", SD.usedBytes() / (1024 * 1024));
+  Serial.printf("Free: %llu MB\n", (SD.totalBytes() - SD.usedBytes()) / (1024 * 1024));
+  
+  return true;
+}
+
+void countExistingVideos() {
+  File root = SD.open("/");
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    
+    String filename = entry.name();
+    if (filename.startsWith("video_") && filename.endsWith(".mjpeg")) {
+      int num = filename.substring(6, filename.indexOf(".")).toInt();
+      if (num >= videoCount) {
+        videoCount = num + 1;
+      }
+    }
+    entry.close();
+  }
+  root.close();
+  
+  Serial.printf("Found %d videos, next: video_%d.mjpeg\n", videoCount, videoCount);
+}
+
+void recordVideo() {
+  isRecording = true;
+  
+  String filename = "/video_" + String(videoCount) + ".mjpeg";
+  
+  videoFile = SD.open(filename.c_str(), FILE_WRITE);
+  if (!videoFile) {
+    Serial.println("✗ File creation failed");
+    isRecording = false;
+    return;
+  }
+  
+  Serial.printf("📹 Recording: %s\n", filename.c_str());
+  
+  unsigned long startTime = millis();
+  int frameCount = 0;
+  
+  while (millis() - startTime < VIDEO_DURATION) {
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("✗ Frame failed");
+      delay(10);
+      continue;
+    }
+    
+    videoFile.write(fb->buf, fb->len);
+    frameCount++;
+    
+    if (frameCount % 10 == 0) {
+      Serial.printf("  Frame %d (%.1f sec)\n", frameCount, (millis() - startTime) / 1000.0);
+    }
+    
+    esp_camera_fb_return(fb);
+    delay(FRAME_DELAY);
+  }
+  
+  videoFile.close();
+  
+  File checkFile = SD.open(filename.c_str(), FILE_READ);
+  size_t fileSize = checkFile.size();
+  checkFile.close();
+  
+  Serial.printf("✓ Complete!\n");
+  Serial.printf("  Frames: %d\n", frameCount);
+  Serial.printf("  Duration: %.1f sec\n", (millis() - startTime) / 1000.0);
+  Serial.printf("  Size: %.2f MB\n", fileSize / (1024.0 * 1024.0));
+  Serial.printf("  SD Free: %llu MB\n\n", (SD.totalBytes() - SD.usedBytes()) / (1024 * 1024));
+  
+  videoCount++;
+  isRecording = false;
+}
