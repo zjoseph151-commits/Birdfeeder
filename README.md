@@ -97,17 +97,29 @@ The ESP32 publishes directly to the Pi MQTT broker using the preferred platform 
 home/devices/birdfeeder-01/status
 home/devices/birdfeeder-01/availability
 home/devices/birdfeeder-01/telemetry
+home/devices/birdfeeder-01/commands
+home/devices/birdfeeder-01/responses
 ```
 
 Availability is retained plain text: `online` while awake and `offline` before intentional deep sleep. Status and telemetry are compact JSON objects that include `device`, `type`, `count`, `uptime_ms`, and `wifi_rssi`, plus extra clip details for the dashboard expandable view.
 
 Because this device sleeps between triggers, the Pi dashboard heartbeat freshness can become `STALE` between motion events. That is expected.
 
+Supported MQTT commands:
+
+- `record_now`: capture and upload one normal fixed-length clip.
+- `stay_awake`: keep the ESP32 awake for a bounded command window, default `600` seconds, max `1800` seconds.
+- `sleep_now`: cancel stay-awake/streaming and enter deep sleep.
+- `stream_on`: start temporary HTTP MJPEG streaming at `http://<esp32-ip>:81/stream`, default `60` seconds, max `180` seconds.
+
+Commands only work while the ESP32 is awake and connected to MQTT. During `stream_on`, PIR-triggered recording is ignored until the stream timeout stops the HTTP server and normal PIR/deep-sleep behavior resumes.
+
 ## Current Firmware Behavior
 
 - Cold boot waits for PIR warmup.
 - ESP32 connects to WiFi and MQTT.
 - ESP32 publishes retained `online` availability and a boot/wake status message.
+- ESP32 subscribes to MQTT commands while awake.
 - If no motion is active, ESP32 publishes sleep status, retained `offline`, and enters deep sleep.
 - PIR `HIGH` wakes the ESP32.
 - ESP32 records `50` VGA JPEG frames at a `200 ms` interval.

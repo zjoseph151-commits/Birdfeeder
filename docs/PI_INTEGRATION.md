@@ -17,6 +17,8 @@ This project integrates with the Raspberry Pi IoT platform by publishing MQTT me
 home/devices/birdfeeder-01/status
 home/devices/birdfeeder-01/availability
 home/devices/birdfeeder-01/telemetry
+home/devices/birdfeeder-01/commands
+home/devices/birdfeeder-01/responses
 ```
 
 Availability uses retained plain text:
@@ -33,6 +35,8 @@ Status and telemetry use valid JSON and include the current platform health fiel
 ```
 
 Extra telemetry fields are intentionally included so the Pi dashboard can show clip details in the expandable row.
+
+Commands are sent to `commands`; acknowledgements are published to `responses`. Commands only work while the ESP32 is awake and connected to MQTT.
 
 ## ESP32 Configuration
 
@@ -55,6 +59,46 @@ Watch live Birdfeeder MQTT traffic:
 
 ```bash
 mosquitto_sub -h localhost -p 1883 -v -t 'home/devices/birdfeeder-01/#'
+```
+
+Send `stay_awake` to keep the device available for command testing:
+
+```bash
+mosquitto_pub -h localhost -p 1883 \
+  -t 'home/devices/birdfeeder-01/commands' \
+  -m '{"command":"stay_awake","duration_seconds":600}'
+```
+
+Trigger an immediate normal recording:
+
+```bash
+mosquitto_pub -h localhost -p 1883 \
+  -t 'home/devices/birdfeeder-01/commands' \
+  -m '{"command":"record_now"}'
+```
+
+Start temporary HTTP MJPEG streaming:
+
+```bash
+mosquitto_pub -h localhost -p 1883 \
+  -t 'home/devices/birdfeeder-01/commands' \
+  -m '{"command":"stream_on","duration_seconds":60}'
+```
+
+Watch the `responses` topic for the returned `stream_url`, then open it from a browser or VLC:
+
+```text
+http://<esp32-ip>:81/stream
+```
+
+The firmware clamps stream duration to a max of `180` seconds and stops the HTTP server when the timeout expires. PIR-triggered recording is ignored while streaming, then resumes afterward.
+
+Send the device back to sleep:
+
+```bash
+mosquitto_pub -h localhost -p 1883 \
+  -t 'home/devices/birdfeeder-01/commands' \
+  -m '{"command":"sleep_now"}'
 ```
 
 Publish a fake status message:
