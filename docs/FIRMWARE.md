@@ -76,8 +76,6 @@ Published topics:
 home/devices/birdfeeder-01/status
 home/devices/birdfeeder-01/availability
 home/devices/birdfeeder-01/telemetry
-home/devices/birdfeeder-01/commands
-home/devices/birdfeeder-01/responses
 ```
 
 Availability payloads are retained plain text:
@@ -99,50 +97,7 @@ Telemetry JSON includes the same health fields plus clip details:
 {"device":"birdfeeder-01","type":"telemetry","count":2,"uptime_ms":12000,"wifi_rssi":-55,"event":"clip_complete","filename":"bird_00000012_0001.mjpeg","frames":50,"bytes":800000,"capture_duration_ms":9860,"capture_ok":true,"upload_ok":true,"upload_attempts":1,"http_status":200}
 ```
 
-## MQTT Commands
-
-Commands are received on:
-
-```text
-home/devices/birdfeeder-01/commands
-```
-
-Responses are published on:
-
-```text
-home/devices/birdfeeder-01/responses
-```
-
-JSON command payloads are recommended:
-
-```json
-{"command":"record_now"}
-```
-
-Plain text commands such as `record_now` are also accepted for quick manual testing.
-
-Supported commands:
-
-- `record_now`: records and uploads one normal fixed-length clip.
-- `stay_awake`: keeps the ESP32 awake for a bounded command window. Optional `duration_seconds`, default `600`, max `1800`.
-- `sleep_now`: cancels stay-awake/streaming and enters deep sleep.
-- `stream_on`: starts temporary HTTP MJPEG streaming. Optional `duration_seconds`, default `60`, max `180`.
-
-Example stream command:
-
-```json
-{"command":"stream_on","duration_seconds":60}
-```
-
-Successful command responses include `device`, `type`, `count`, `uptime_ms`, `wifi_rssi`, `command`, `success`, and a message. `stream_on` also returns `stream_url`, usually:
-
-```text
-http://<esp32-ip>:81/stream
-```
-
-MQTT commands only work while the ESP32 is awake and connected. A sleeping ESP32 cannot receive MQTT until it wakes from PIR motion or reset.
-
-During `stream_on`, PIR-triggered recording is ignored. When the strict stream timeout expires, the HTTP stream server stops, then normal PIR/deep-sleep behavior resumes.
+The firmware intentionally does not subscribe to commands yet.
 
 ## Upload Format
 

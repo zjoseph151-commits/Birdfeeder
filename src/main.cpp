@@ -1,12 +1,9 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdint>
-#include <cstdlib>
-#include <cctype>
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiServer.h>
 #include <PubSubClient.h>
 #include "esp_heap_caps.h"
 #include "esp_sleep.h"
@@ -49,7 +46,7 @@
 #define MOTION_ACTIVE_LEVEL   HIGH
 
 const char* DEVICE_ID = "birdfeeder-01";
-const char* FIRMWARE_VERSION = "0.4.0";
+const char* FIRMWARE_VERSION = "0.3.1";
 
 const char* WIFI_SSID = BIRD_WIFI_SSID;
 const char* WIFI_PASSWORD = BIRD_WIFI_PASSWORD;
@@ -72,20 +69,8 @@ const uint16_t MQTT_KEEPALIVE_SECONDS = 15;
 const uint16_t MQTT_SOCKET_TIMEOUT_SECONDS = 5;
 const uint8_t MQTT_PUBLISH_RETRY_COUNT = 2;
 const uint32_t MQTT_PUBLISH_RETRY_DELAY_MS = 150;
-const uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
-const size_t MQTT_COMMAND_BUFFER_SIZE = 256;
-const uint32_t STAY_AWAKE_DEFAULT_SECONDS = 600;
-const uint32_t STAY_AWAKE_MAX_SECONDS = 1800;
-const uint16_t STREAM_HTTP_PORT = 81;
-const uint32_t STREAM_DEFAULT_SECONDS = 60;
-const uint32_t STREAM_MAX_SECONDS = 180;
-const uint32_t STREAM_FRAME_INTERVAL_MS = 200;
-const uint32_t STREAM_CLIENT_WRITE_TIMEOUT_MS = 2000;
-const uint32_t STREAM_REQUEST_DRAIN_MS = 250;
-const char* STREAM_HTTP_PATH = "/stream";
-const char* STREAM_BOUNDARY = "birdframe";
 const size_t UPLOAD_BUFFER_SIZE = 2048;
-const size_t MAX_CLIP_BYTES = 4UL * 1024UL * 1024UL;
+const size_t MAX_CLIP_BYTES = 6UL * 1024UL * 1024UL;
 const uint32_t FRAME_INTERVAL_MS = 200;      // 5 FPS playback target
 const uint32_t CLIP_FRAME_COUNT = 50;        // Fixed frame count per trigger
 const uint32_t CAPTURE_START_DELAY_MS = 150;
@@ -99,8 +84,23 @@ const uint32_t SENSOR_RESET_TIMEOUT_MS = 20000;
 const uint32_t RETRIGGER_BLOCK_MS = 5000;
 const uint64_t SENSOR_STUCK_SLEEP_US = 30000000ULL;
 
-const framesize_t CAMERA_FRAME_SIZE = FRAMESIZE_VGA;
-const int CAMERA_JPEG_QUALITY = 10;          // Lower number = better JPEG quality
+const framesize_t CAMERA_FRAME_SIZE = FRAMESIZE_SVGA;
+const int CAMERA_JPEG_QUALITY = 6;          // Lower number = better JPEG quality
+const int CAMERA_BRIGHTNESS = -2;            // -2 to 2
+const int CAMERA_CONTRAST = -2;              // -2 to 2
+const int CAMERA_SATURATION = 2;            // -2 to 2
+const int CAMERA_SHARPNESS = 2;             // -2 to 2
+const int CAMERA_DENOISE = 1;               // 0 off, 1 on
+const int CAMERA_WHITE_BALANCE = 1;         // 0 off, 1 on
+const int CAMERA_AWB_GAIN = 1;              // 0 off, 1 on
+const int CAMERA_GAIN_CONTROL = 1;          // 0 off, 1 on
+const int CAMERA_EXPOSURE_CONTROL = 1;      // 0 off, 1 on
+const int CAMERA_AEC2 = 1;                  // 0 off, 1 on
+const int CAMERA_AE_LEVEL = 0;              // -2 to 2
+const int CAMERA_BAD_PIXEL_CORRECT = 1;     // 0 off, 1 on
+const int CAMERA_WHITE_PIXEL_CORRECT = 1;   // 0 off, 1 on
+const int CAMERA_RAW_GAMMA = 1;             // 0 off, 1 on
+const int CAMERA_LENS_CORRECT = 1;          // 0 off, 1 on
 
 bool cameraReady = false;
 bool recording = false;
@@ -110,8 +110,6 @@ esp_sleep_wakeup_cause_t lastWakeCause = ESP_SLEEP_WAKEUP_UNDEFINED;
 
 WiFiClient mqttWifiClient;
 PubSubClient mqttClient(mqttWifiClient);
-WiFiServer streamServer(STREAM_HTTP_PORT, 1);
-WiFiClient streamClient;
 
 RTC_DATA_ATTR uint32_t clipCounter = 0;
 RTC_DATA_ATTR uint32_t mqttMessageCounter = 0;
@@ -119,62 +117,28 @@ uint32_t motionActiveSinceMs = 0;
 uint32_t sensorResetSinceMs = 0;
 uint32_t lastRecordingFinishedMs = 0;
 uint32_t lastTestTriggerMs = 0;
-uint32_t lastMqttReconnectAttemptMs = 0;
-uint32_t stayAwakeUntilMs = 0;
-uint32_t streamEndMs = 0;
-uint32_t nextStreamFrameMs = 0;
-uint32_t streamFrameCount = 0;
 int lastUploadHttpStatus = 0;
-bool stayAwakeActive = false;
-bool streamActive = false;
-bool streamServerRunning = false;
-bool streamClientHeaderSent = false;
-bool pendingCommandAvailable = false;
-bool pendingCommandOverflow = false;
-char pendingCommandPayload[MQTT_COMMAND_BUFFER_SIZE];
 
 bool initCamera();
 bool ensureWiFiConnected();
 void disconnectWiFi();
 void initMqtt();
-void serviceMqtt();
 bool ensureMqttConnected();
 void disconnectMqtt();
-void onMqttMessage(char* topic, uint8_t* payload, unsigned int length);
 void buildMqttTopic(const char* messageType, char* topic, size_t topicSize);
 uint32_t nextMqttCount();
 const char* wakeCauseName(esp_sleep_wakeup_cause_t wakeCause);
-bool timeReached(uint32_t deadlineMs);
-uint32_t clampDurationSeconds(uint32_t requestedSeconds, uint32_t defaultSeconds, uint32_t maxSeconds);
-bool isStayAwakeCurrent();
-void handleStayAwakeTimeout();
-void setStayAwake(uint32_t durationSeconds);
-void clearStayAwake();
-void trimCopy(const char* source, char* dest, size_t destSize);
-bool extractJsonStringField(const char* payload, const char* key, char* dest, size_t destSize);
-bool extractJsonUIntField(const char* payload, const char* key, uint32_t& value);
-bool parseCommandPayload(const char* payload, char* command, size_t commandSize, uint32_t& durationSeconds);
-void processPendingMqttCommand();
-bool publishCommandResponse(const char* command, bool success, const char* detail, uint32_t durationSeconds, const char* streamUrl);
 bool publishMqttPayload(const char* messageType, const char* payload, bool retained);
 bool publishAvailability(const char* state, bool retained);
 bool publishStatusEvent(const char* eventName);
 bool publishClipTelemetry(const char* eventName, const char* filename, bool captureOk, bool uploadOk, uint32_t frameCount, size_t clipBytes, uint32_t captureDurationMs, uint8_t uploadAttempts, int httpStatus);
-void buildStreamUrl(char* url, size_t urlSize);
-bool startStreamMode(uint32_t durationSeconds);
-void stopStreamMode(const char* reason, bool resumePir);
-void handleStreamMode();
-void acceptStreamClient();
-void drainStreamClientRequest(WiFiClient& client);
-bool writeStreamAll(WiFiClient& client, const uint8_t* data, size_t len);
-bool writeStreamText(WiFiClient& client, const char* text);
-bool sendStreamFrame();
 void handleTriggers();
 bool recordAndUploadVideo();
 bool captureClipToMemory(uint8_t* clipData, size_t clipCapacity, uint32_t& frameCount, size_t& totalBytes, uint32_t& captureDurationMs);
 bool captureFrameToBuffer(uint8_t* clipData, size_t clipCapacity, size_t& totalBytes);
 bool uploadClipBuffer(const uint8_t* clipData, size_t clipSize, const char* serverFilename, uint32_t frameCount, uint32_t captureDurationMs);
 bool motionDetectedNow();
+void applyCameraSensorProfile(sensor_t* sensor);
 void printServerTarget();
 void flushCameraFrames(uint8_t count);
 void enterDeepSleep(bool useMotionWake);
@@ -228,20 +192,12 @@ void setup() {
 }
 
 void loop() {
-  serviceMqtt();
-  processPendingMqttCommand();
-  handleStreamMode();
-  handleStayAwakeTimeout();
-
-  if (!streamActive) {
-    handleTriggers();
-  }
-
+  handleTriggers();
   delay(10);
 }
 
 void handleTriggers() {
-  if (!cameraReady || recording || streamActive) {
+  if (!cameraReady || recording) {
     return;
   }
 
@@ -264,13 +220,9 @@ void handleTriggers() {
         waitingForSensorReset = false;
         sensorResetSinceMs = 0;
         Serial.println("Sensor reset complete");
-        if (isStayAwakeCurrent()) {
-          publishStatusEvent("stay_awake_idle");
-        } else {
-          enterDeepSleep(true);
-        }
+        enterDeepSleep(true);
       }
-    } else if (!isStayAwakeCurrent() && lastRecordingFinishedMs != 0 && (now - lastRecordingFinishedMs >= SENSOR_RESET_TIMEOUT_MS)) {
+    } else if (lastRecordingFinishedMs != 0 && (now - lastRecordingFinishedMs >= SENSOR_RESET_TIMEOUT_MS)) {
       Serial.println("Sensor stayed active too long, using timer sleep");
       enterDeepSleep(false);
     } else {
@@ -336,14 +288,48 @@ bool initCamera() {
 
   sensor_t* sensor = esp_camera_sensor_get();
   if (sensor != nullptr) {
-    sensor->set_framesize(sensor, CAMERA_FRAME_SIZE);
-    sensor->set_quality(sensor, CAMERA_JPEG_QUALITY);
-    sensor->set_brightness(sensor, 0);
-    sensor->set_contrast(sensor, 0);
-    sensor->set_saturation(sensor, 0);
+    applyCameraSensorProfile(sensor);
   }
 
   return true;
+}
+
+void applyCameraSensorProfile(sensor_t* sensor) {
+  if (sensor == nullptr) {
+    return;
+  }
+
+  sensor->set_framesize(sensor, CAMERA_FRAME_SIZE);
+  sensor->set_quality(sensor, CAMERA_JPEG_QUALITY);
+  sensor->set_brightness(sensor, CAMERA_BRIGHTNESS);
+  sensor->set_contrast(sensor, CAMERA_CONTRAST);
+  sensor->set_saturation(sensor, CAMERA_SATURATION);
+  sensor->set_sharpness(sensor, CAMERA_SHARPNESS);
+  sensor->set_denoise(sensor, CAMERA_DENOISE);
+  sensor->set_whitebal(sensor, CAMERA_WHITE_BALANCE);
+  sensor->set_awb_gain(sensor, CAMERA_AWB_GAIN);
+  sensor->set_gain_ctrl(sensor, CAMERA_GAIN_CONTROL);
+  sensor->set_exposure_ctrl(sensor, CAMERA_EXPOSURE_CONTROL);
+  sensor->set_aec2(sensor, CAMERA_AEC2);
+  sensor->set_ae_level(sensor, CAMERA_AE_LEVEL);
+  sensor->set_bpc(sensor, CAMERA_BAD_PIXEL_CORRECT);
+  sensor->set_wpc(sensor, CAMERA_WHITE_PIXEL_CORRECT);
+  sensor->set_raw_gma(sensor, CAMERA_RAW_GAMMA);
+  sensor->set_lenc(sensor, CAMERA_LENS_CORRECT);
+
+  Serial.printf("Camera sensor profile: brightness %d, contrast %d, saturation %d, sharpness %d, denoise %d\n",
+                CAMERA_BRIGHTNESS,
+                CAMERA_CONTRAST,
+                CAMERA_SATURATION,
+                CAMERA_SHARPNESS,
+                CAMERA_DENOISE);
+  Serial.printf("Camera auto controls: white balance %d, AWB gain %d, gain %d, exposure %d, AEC2 %d, AE level %d\n",
+                CAMERA_WHITE_BALANCE,
+                CAMERA_AWB_GAIN,
+                CAMERA_GAIN_CONTROL,
+                CAMERA_EXPOSURE_CONTROL,
+                CAMERA_AEC2,
+                CAMERA_AE_LEVEL);
 }
 
 bool ensureWiFiConnected() {
@@ -392,24 +378,6 @@ void initMqtt() {
   mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
   mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
   mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
-  mqttClient.setCallback(onMqttMessage);
-}
-
-void serviceMqtt() {
-  if (strlen(MQTT_HOST) == 0 || WiFi.status() != WL_CONNECTED) {
-    return;
-  }
-
-  if (mqttClient.connected()) {
-    mqttClient.loop();
-    return;
-  }
-
-  const uint32_t now = millis();
-  if (lastMqttReconnectAttemptMs == 0 || now - lastMqttReconnectAttemptMs >= MQTT_RECONNECT_INTERVAL_MS) {
-    lastMqttReconnectAttemptMs = now;
-    ensureMqttConnected();
-  }
 }
 
 bool ensureMqttConnected() {
@@ -442,13 +410,8 @@ bool ensureMqttConnected() {
   const uint32_t startMs = millis();
   while (!mqttClient.connected() && (millis() - startMs < MQTT_CONNECT_TIMEOUT_MS)) {
     if (mqttClient.connect(clientId, availabilityTopic, 0, true, "offline")) {
-      char commandsTopic[96];
-      buildMqttTopic("commands", commandsTopic, sizeof(commandsTopic));
-      mqttClient.subscribe(commandsTopic);
       Serial.print(", client=");
       Serial.println(clientId);
-      Serial.print("MQTT subscribed ");
-      Serial.println(commandsTopic);
       mqttClient.loop();
       return true;
     }
@@ -466,27 +429,6 @@ void disconnectMqtt() {
     mqttClient.loop();
     mqttClient.disconnect();
   }
-}
-
-void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {
-  char commandsTopic[96];
-  buildMqttTopic("commands", commandsTopic, sizeof(commandsTopic));
-
-  if (strcmp(topic, commandsTopic) != 0) {
-    return;
-  }
-
-  if (length >= sizeof(pendingCommandPayload)) {
-    pendingCommandPayload[0] = '\0';
-    pendingCommandOverflow = true;
-    pendingCommandAvailable = true;
-    return;
-  }
-
-  memcpy(pendingCommandPayload, payload, length);
-  pendingCommandPayload[length] = '\0';
-  pendingCommandOverflow = false;
-  pendingCommandAvailable = true;
 }
 
 void buildMqttTopic(const char* messageType, char* topic, size_t topicSize) {
@@ -512,314 +454,6 @@ const char* wakeCauseName(esp_sleep_wakeup_cause_t wakeCause) {
     default:
       return "other";
   }
-}
-
-bool timeReached(uint32_t deadlineMs) {
-  return static_cast<int32_t>(millis() - deadlineMs) >= 0;
-}
-
-uint32_t clampDurationSeconds(uint32_t requestedSeconds, uint32_t defaultSeconds, uint32_t maxSeconds) {
-  uint32_t durationSeconds = requestedSeconds == 0 ? defaultSeconds : requestedSeconds;
-  if (durationSeconds > maxSeconds) {
-    durationSeconds = maxSeconds;
-  }
-  return durationSeconds;
-}
-
-bool isStayAwakeCurrent() {
-  if (!stayAwakeActive) {
-    return false;
-  }
-
-  if (timeReached(stayAwakeUntilMs)) {
-    return false;
-  }
-
-  return true;
-}
-
-void handleStayAwakeTimeout() {
-  if (!stayAwakeActive || !timeReached(stayAwakeUntilMs)) {
-    return;
-  }
-
-  stayAwakeActive = false;
-  Serial.println("Stay-awake window expired");
-  publishStatusEvent("stay_awake_expired");
-
-  if (!recording && !streamActive && !motionDetectedNow()) {
-    enterDeepSleep(true);
-  }
-}
-
-void setStayAwake(uint32_t durationSeconds) {
-  stayAwakeActive = true;
-  stayAwakeUntilMs = millis() + (durationSeconds * 1000UL);
-  waitingForSensorReset = false;
-  sensorResetSinceMs = 0;
-  motionActiveSinceMs = 0;
-  publishStatusEvent("stay_awake");
-}
-
-void clearStayAwake() {
-  stayAwakeActive = false;
-  stayAwakeUntilMs = 0;
-}
-
-void trimCopy(const char* source, char* dest, size_t destSize) {
-  if (destSize == 0) {
-    return;
-  }
-
-  while (*source != '\0' && isspace(static_cast<unsigned char>(*source))) {
-    source++;
-  }
-
-  size_t sourceLen = strlen(source);
-  while (sourceLen > 0 && isspace(static_cast<unsigned char>(source[sourceLen - 1]))) {
-    sourceLen--;
-  }
-
-  const size_t copyLen = sourceLen < (destSize - 1) ? sourceLen : (destSize - 1);
-  for (size_t i = 0; i < copyLen; ++i) {
-    dest[i] = static_cast<char>(tolower(static_cast<unsigned char>(source[i])));
-  }
-  dest[copyLen] = '\0';
-}
-
-bool extractJsonStringField(const char* payload, const char* key, char* dest, size_t destSize) {
-  if (destSize == 0) {
-    return false;
-  }
-
-  char pattern[40];
-  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-  const char* cursor = strstr(payload, pattern);
-  if (cursor == nullptr) {
-    return false;
-  }
-
-  cursor = strchr(cursor + strlen(pattern), ':');
-  if (cursor == nullptr) {
-    return false;
-  }
-  cursor++;
-
-  while (*cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
-    cursor++;
-  }
-
-  if (*cursor != '"') {
-    return false;
-  }
-  cursor++;
-
-  size_t outIndex = 0;
-  while (*cursor != '\0' && *cursor != '"' && outIndex < destSize - 1) {
-    dest[outIndex++] = static_cast<char>(tolower(static_cast<unsigned char>(*cursor)));
-    cursor++;
-  }
-  dest[outIndex] = '\0';
-  return outIndex > 0;
-}
-
-bool extractJsonUIntField(const char* payload, const char* key, uint32_t& value) {
-  char pattern[40];
-  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-  const char* cursor = strstr(payload, pattern);
-  if (cursor == nullptr) {
-    return false;
-  }
-
-  cursor = strchr(cursor + strlen(pattern), ':');
-  if (cursor == nullptr) {
-    return false;
-  }
-  cursor++;
-
-  while (*cursor != '\0' && (isspace(static_cast<unsigned char>(*cursor)) || *cursor == '"')) {
-    cursor++;
-  }
-
-  char* endPtr = nullptr;
-  const unsigned long parsed = strtoul(cursor, &endPtr, 10);
-  if (endPtr == cursor) {
-    return false;
-  }
-
-  value = static_cast<uint32_t>(parsed);
-  return true;
-}
-
-bool parseCommandPayload(const char* payload, char* command, size_t commandSize, uint32_t& durationSeconds) {
-  durationSeconds = 0;
-
-  char trimmed[MQTT_COMMAND_BUFFER_SIZE];
-  trimCopy(payload, trimmed, sizeof(trimmed));
-
-  if (trimmed[0] == '{') {
-    if (!extractJsonStringField(payload, "command", command, commandSize)) {
-      return false;
-    }
-    extractJsonUIntField(payload, "duration_seconds", durationSeconds) ||
-      extractJsonUIntField(payload, "duration", durationSeconds);
-    return true;
-  }
-
-  trimCopy(payload, command, commandSize);
-  return command[0] != '\0';
-}
-
-void processPendingMqttCommand() {
-  if (!pendingCommandAvailable) {
-    return;
-  }
-
-  char payload[MQTT_COMMAND_BUFFER_SIZE];
-  const bool overflow = pendingCommandOverflow;
-  strncpy(payload, pendingCommandPayload, sizeof(payload));
-  payload[sizeof(payload) - 1] = '\0';
-  pendingCommandAvailable = false;
-  pendingCommandOverflow = false;
-
-  if (overflow) {
-    publishCommandResponse("unknown", false, "payload_too_large", 0, nullptr);
-    return;
-  }
-
-  char command[32];
-  uint32_t requestedDurationSeconds = 0;
-  if (!parseCommandPayload(payload, command, sizeof(command), requestedDurationSeconds)) {
-    publishCommandResponse("unknown", false, "malformed_command", 0, nullptr);
-    return;
-  }
-
-  Serial.print("MQTT command: ");
-  Serial.println(command);
-
-  if (strcmp(command, "record_now") == 0) {
-    if (recording) {
-      publishCommandResponse(command, false, "recording_active", 0, nullptr);
-      return;
-    }
-    if (streamActive) {
-      publishCommandResponse(command, false, "streaming_active", 0, nullptr);
-      return;
-    }
-    if (!cameraReady) {
-      publishCommandResponse(command, false, "camera_not_ready", 0, nullptr);
-      return;
-    }
-
-    publishCommandResponse(command, true, "recording_started", 0, nullptr);
-    publishStatusEvent("command_record_now");
-    recordAndUploadVideo();
-    return;
-  }
-
-  if (strcmp(command, "stay_awake") == 0) {
-    const uint32_t durationSeconds = clampDurationSeconds(
-      requestedDurationSeconds,
-      STAY_AWAKE_DEFAULT_SECONDS,
-      STAY_AWAKE_MAX_SECONDS
-    );
-    setStayAwake(durationSeconds);
-    publishCommandResponse(command, true, "stay_awake_started", durationSeconds, nullptr);
-    return;
-  }
-
-  if (strcmp(command, "sleep_now") == 0) {
-    publishCommandResponse(command, true, "sleeping", 0, nullptr);
-    clearStayAwake();
-    stopStreamMode("sleep_now", false);
-    publishStatusEvent("command_sleep_now");
-    enterDeepSleep(!motionDetectedNow());
-    return;
-  }
-
-  if (strcmp(command, "stream_on") == 0) {
-    if (recording) {
-      publishCommandResponse(command, false, "recording_active", 0, nullptr);
-      return;
-    }
-    if (!cameraReady) {
-      publishCommandResponse(command, false, "camera_not_ready", 0, nullptr);
-      return;
-    }
-
-    const uint32_t durationSeconds = clampDurationSeconds(
-      requestedDurationSeconds,
-      STREAM_DEFAULT_SECONDS,
-      STREAM_MAX_SECONDS
-    );
-
-    if (!startStreamMode(durationSeconds)) {
-      publishCommandResponse(command, false, "stream_start_failed", 0, nullptr);
-      return;
-    }
-
-    char streamUrl[80];
-    buildStreamUrl(streamUrl, sizeof(streamUrl));
-    publishCommandResponse(command, true, "stream_started", durationSeconds, streamUrl);
-    return;
-  }
-
-  publishCommandResponse(command, false, "unknown_command", 0, nullptr);
-}
-
-bool publishCommandResponse(const char* command, bool success, const char* detail, uint32_t durationSeconds, const char* streamUrl) {
-  char payload[700];
-  const uint32_t count = nextMqttCount();
-  const int rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
-
-  int written = snprintf(
-    payload,
-    sizeof(payload),
-    "{\"device\":\"%s\",\"type\":\"responses\",\"count\":%lu,\"uptime_ms\":%lu,"
-    "\"wifi_rssi\":%d,\"command\":\"%s\",\"success\":%s,\"%s\":\"%s\"",
-    DEVICE_ID,
-    static_cast<unsigned long>(count),
-    static_cast<unsigned long>(millis()),
-    rssi,
-    command,
-    success ? "true" : "false",
-    success ? "message" : "error",
-    detail
-  );
-
-  if (written < 0 || static_cast<size_t>(written) >= sizeof(payload)) {
-    return false;
-  }
-
-  size_t used = static_cast<size_t>(written);
-  if (durationSeconds > 0 && used < sizeof(payload)) {
-    written = snprintf(
-      payload + used,
-      sizeof(payload) - used,
-      ",\"duration_seconds\":%lu",
-      static_cast<unsigned long>(durationSeconds)
-    );
-    if (written < 0 || static_cast<size_t>(written) >= sizeof(payload) - used) {
-      return false;
-    }
-    used += static_cast<size_t>(written);
-  }
-
-  if (streamUrl != nullptr && streamUrl[0] != '\0' && used < sizeof(payload)) {
-    written = snprintf(payload + used, sizeof(payload) - used, ",\"stream_url\":\"%s\"", streamUrl);
-    if (written < 0 || static_cast<size_t>(written) >= sizeof(payload) - used) {
-      return false;
-    }
-    used += static_cast<size_t>(written);
-  }
-
-  if (used + 2 >= sizeof(payload)) {
-    return false;
-  }
-  payload[used++] = '}';
-  payload[used] = '\0';
-
-  return publishMqttPayload("responses", payload, false);
 }
 
 bool publishMqttPayload(const char* messageType, const char* payload, bool retained) {
@@ -864,8 +498,7 @@ bool publishStatusEvent(const char* eventName) {
     sizeof(payload),
     "{\"device\":\"%s\",\"type\":\"status\",\"count\":%lu,\"uptime_ms\":%lu,"
     "\"wifi_rssi\":%d,\"firmware_version\":\"%s\",\"event\":\"%s\","
-    "\"wake_reason\":\"%s\",\"stay_awake\":%s,\"stream_active\":%s,"
-    "\"stream_port\":%u,\"ip\":\"%u.%u.%u.%u\",\"free_heap\":%lu,"
+    "\"wake_reason\":\"%s\",\"ip\":\"%u.%u.%u.%u\",\"free_heap\":%lu,"
     "\"free_psram\":%lu}",
     DEVICE_ID,
     static_cast<unsigned long>(count),
@@ -874,9 +507,6 @@ bool publishStatusEvent(const char* eventName) {
     FIRMWARE_VERSION,
     eventName,
     wakeCauseName(lastWakeCause),
-    isStayAwakeCurrent() ? "true" : "false",
-    streamActive ? "true" : "false",
-    STREAM_HTTP_PORT,
     static_cast<unsigned int>(ip[0]),
     static_cast<unsigned int>(ip[1]),
     static_cast<unsigned int>(ip[2]),
@@ -929,243 +559,6 @@ bool publishClipTelemetry(const char* eventName, const char* filename, bool capt
   }
 
   return publishMqttPayload("telemetry", payload, false);
-}
-
-void buildStreamUrl(char* url, size_t urlSize) {
-  const IPAddress ip = WiFi.localIP();
-  snprintf(
-    url,
-    urlSize,
-    "http://%u.%u.%u.%u:%u%s",
-    static_cast<unsigned int>(ip[0]),
-    static_cast<unsigned int>(ip[1]),
-    static_cast<unsigned int>(ip[2]),
-    static_cast<unsigned int>(ip[3]),
-    STREAM_HTTP_PORT,
-    STREAM_HTTP_PATH
-  );
-}
-
-bool startStreamMode(uint32_t durationSeconds) {
-  if (!ensureWiFiConnected()) {
-    Serial.println("Stream start failed: WiFi unavailable");
-    return false;
-  }
-
-  if (streamClient) {
-    streamClient.stop();
-  }
-
-  if (!streamServerRunning) {
-    streamServer.begin();
-    streamServer.setNoDelay(true);
-    streamServerRunning = true;
-  }
-
-  streamActive = true;
-  streamClientHeaderSent = false;
-  streamFrameCount = 0;
-  streamEndMs = millis() + (durationSeconds * 1000UL);
-  nextStreamFrameMs = millis();
-  waitingForSensorReset = false;
-  sensorResetSinceMs = 0;
-  motionActiveSinceMs = 0;
-
-  char streamUrl[80];
-  buildStreamUrl(streamUrl, sizeof(streamUrl));
-  Serial.print("Temporary MJPEG stream started: ");
-  Serial.println(streamUrl);
-  Serial.printf("Stream timeout: %lu seconds\n", static_cast<unsigned long>(durationSeconds));
-  publishStatusEvent("stream_started");
-  return true;
-}
-
-void stopStreamMode(const char* reason, bool resumePir) {
-  const bool wasActive = streamActive;
-
-  if (streamClient) {
-    streamClient.stop();
-  }
-
-  if (streamServerRunning) {
-    streamServer.end();
-    streamServerRunning = false;
-  }
-
-  streamActive = false;
-  streamClientHeaderSent = false;
-  nextStreamFrameMs = 0;
-
-  if (wasActive) {
-    Serial.print("Temporary MJPEG stream stopped: ");
-    Serial.println(reason);
-    publishStatusEvent(reason);
-  }
-
-  if (!resumePir) {
-    return;
-  }
-
-  waitingForSensorReset = false;
-  sensorResetSinceMs = 0;
-  motionActiveSinceMs = 0;
-  lastRecordingFinishedMs = millis();
-
-  if (!isStayAwakeCurrent() && !motionDetectedNow()) {
-    enterDeepSleep(true);
-  }
-}
-
-void handleStreamMode() {
-  if (!streamActive) {
-    return;
-  }
-
-  if (timeReached(streamEndMs)) {
-    stopStreamMode("stream_timeout", true);
-    return;
-  }
-
-  if (streamClient && !streamClient.connected()) {
-    streamClient.stop();
-    streamClientHeaderSent = false;
-  }
-
-  if (!streamClient || !streamClient.connected()) {
-    acceptStreamClient();
-    return;
-  }
-
-  sendStreamFrame();
-}
-
-void acceptStreamClient() {
-  WiFiClient incomingClient = streamServer.available();
-  if (!incomingClient) {
-    return;
-  }
-
-  if (streamClient) {
-    streamClient.stop();
-  }
-
-  streamClient = incomingClient;
-  streamClient.setNoDelay(true);
-  streamClient.setTimeout(1);
-  drainStreamClientRequest(streamClient);
-
-  char header[192];
-  snprintf(
-    header,
-    sizeof(header),
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: multipart/x-mixed-replace; boundary=%s\r\n"
-    "Cache-Control: no-cache\r\n"
-    "Pragma: no-cache\r\n"
-    "Connection: close\r\n"
-    "Access-Control-Allow-Origin: *\r\n\r\n",
-    STREAM_BOUNDARY
-  );
-
-  if (!writeStreamText(streamClient, header)) {
-    streamClient.stop();
-    streamClientHeaderSent = false;
-    return;
-  }
-
-  streamClientHeaderSent = true;
-  nextStreamFrameMs = millis();
-  Serial.println("MJPEG stream client connected");
-  publishStatusEvent("stream_client_connected");
-}
-
-void drainStreamClientRequest(WiFiClient& client) {
-  const uint32_t startMs = millis();
-  while (client.connected() && millis() - startMs < STREAM_REQUEST_DRAIN_MS) {
-    while (client.available()) {
-      client.read();
-    }
-    delay(1);
-  }
-}
-
-bool writeStreamAll(WiFiClient& client, const uint8_t* data, size_t len) {
-  size_t totalWritten = 0;
-  uint32_t lastProgressMs = millis();
-
-  while (totalWritten < len && client.connected()) {
-    const size_t written = client.write(data + totalWritten, len - totalWritten);
-    if (written == 0) {
-      if (millis() - lastProgressMs >= STREAM_CLIENT_WRITE_TIMEOUT_MS) {
-        return false;
-      }
-      delay(1);
-      continue;
-    }
-
-    totalWritten += written;
-    lastProgressMs = millis();
-    mqttClient.loop();
-    delay(0);
-
-    if (timeReached(streamEndMs)) {
-      return false;
-    }
-  }
-
-  return totalWritten == len;
-}
-
-bool writeStreamText(WiFiClient& client, const char* text) {
-  return writeStreamAll(client, reinterpret_cast<const uint8_t*>(text), strlen(text));
-}
-
-bool sendStreamFrame() {
-  if (!streamClient || !streamClient.connected() || !streamClientHeaderSent) {
-    return false;
-  }
-
-  if (!timeReached(nextStreamFrameMs)) {
-    return true;
-  }
-
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (fb == nullptr) {
-    Serial.println("Stream frame capture failed");
-    nextStreamFrameMs = millis() + STREAM_FRAME_INTERVAL_MS;
-    return false;
-  }
-
-  char frameHeader[128];
-  snprintf(
-    frameHeader,
-    sizeof(frameHeader),
-    "--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
-    STREAM_BOUNDARY,
-    static_cast<unsigned int>(fb->len)
-  );
-
-  const bool ok =
-    writeStreamText(streamClient, frameHeader) &&
-    writeStreamAll(streamClient, fb->buf, fb->len) &&
-    writeStreamText(streamClient, "\r\n");
-
-  esp_camera_fb_return(fb);
-
-  if (!ok) {
-    Serial.println("Stream client write failed");
-    streamClient.stop();
-    streamClientHeaderSent = false;
-    return false;
-  }
-
-  streamFrameCount++;
-  if ((streamFrameCount % 25U) == 0U) {
-    Serial.printf("Streamed %lu frames\n", static_cast<unsigned long>(streamFrameCount));
-  }
-
-  nextStreamFrameMs = millis() + STREAM_FRAME_INTERVAL_MS;
-  return true;
 }
 
 bool recordAndUploadVideo() {
@@ -1443,10 +836,6 @@ void enterDeepSleep(bool useMotionWake) {
     return;
   }
 
-  if (streamActive) {
-    stopStreamMode("sleep_requested", false);
-  }
-
   Serial.println("Preparing for deep sleep");
   publishStatusEvent(useMotionWake ? "sleep_motion_armed" : "sleep_timer_armed");
   publishAvailability("offline", true);
@@ -1481,11 +870,6 @@ void enterDeepSleep(bool useMotionWake) {
 }
 
 void armSleepIfIdle() {
-  if (isStayAwakeCurrent() || streamActive) {
-    Serial.println("Staying awake by command");
-    return;
-  }
-
   if (motionDetectedNow()) {
     Serial.println("Motion already active at boot, staying awake");
     return;
