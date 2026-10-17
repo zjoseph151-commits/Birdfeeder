@@ -50,17 +50,13 @@ The ESP32 must use the Raspberry Pi LAN IP or hostname. `localhost` only points 
 
 ## Capture Flow
 
-1. Wake from PIR motion or cold boot.
-2. Initialize camera, WiFi, and MQTT.
-3. Publish retained `online` availability and a JSON status message.
-4. Allocate `MAX_CLIP_BYTES` in PSRAM/RAM.
-5. Capture `CLIP_FRAME_COUNT` JPEG frames into the buffer.
-6. Upload the raw MJPEG buffer to `/upload`.
-7. Publish JSON clip telemetry.
-8. Free the buffer.
-9. Wait for PIR idle.
-10. Publish sleep status and retained `offline` availability.
-11. Return to deep sleep.
+1. Boot, initialize camera, WiFi, and MQTT, and start the PIR warmup timer.
+2. Publish retained `online` availability and a JSON status message.
+3. On confirmed PIR motion or `record_now`, allocate `MAX_CLIP_BYTES` in PSRAM/RAM.
+4. Capture `CLIP_FRAME_COUNT` JPEG frames into the buffer.
+5. Upload the raw MJPEG buffer to `/upload` and publish JSON clip telemetry.
+6. Free the buffer and wait for PIR idle before another motion trigger.
+7. Stay online, publish a status heartbeat every 60 seconds, and handle MQTT commands.
 
 ## MQTT Contract
 
@@ -76,6 +72,7 @@ Published topics:
 home/devices/birdfeeder-01/status
 home/devices/birdfeeder-01/availability
 home/devices/birdfeeder-01/telemetry
+home/devices/birdfeeder-01/responses
 ```
 
 Availability payloads are retained plain text:
@@ -97,7 +94,25 @@ Telemetry JSON includes the same health fields plus clip details:
 {"device":"birdfeeder-01","type":"telemetry","count":2,"uptime_ms":12000,"wifi_rssi":-55,"event":"clip_complete","filename":"bird_00000012_0001.mjpeg","frames":50,"bytes":800000,"capture_duration_ms":9860,"capture_ok":true,"upload_ok":true,"upload_attempts":1,"http_status":200}
 ```
 
-The firmware intentionally does not subscribe to commands yet.
+## MQTT Commands
+
+The ESP32 subscribes to `home/devices/birdfeeder-01/commands` and publishes JSON replies to `home/devices/birdfeeder-01/responses`. Publish commands without the MQTT retain flag so an old command cannot replay when the ESP32 reconnects. Plain text command names also work.
+
+| Command | Behavior |
+| --- | --- |
+| `record_now` | Capture and upload one clip, even in standby. Standby remains active afterward. |
+| `stay_awake` | Resume normal camera and PIR operation from standby. The ESP32 is continuously powered, so this has no expiry. A legacy `duration_seconds` field is accepted but ignored. |
+| `sleep_now` | Stop streaming, release the camera, and pause PIR recording. MQTT stays connected; this is standby, not ESP32 deep sleep. |
+| `stream_on` | Serve MJPEG at `http://<esp32-ip>:81/stream`. Default 60 seconds, capped at 180 seconds. PIR recording is paused, then resumes when the stream times out. A second `stream_on` is rejected while streaming, so the timeout cannot be extended. |
+
+Example on the Pi:
+
+```bash
+mosquitto_sub -h localhost -p 1883 -v -t 'home/devices/birdfeeder-01/responses'
+mosquitto_pub -h localhost -p 1883 -t 'home/devices/birdfeeder-01/commands' -m '{"device":"birdfeeder-01","command":"stream_on","duration_seconds":60}'
+```
+
+Open the returned `stream_url` on a device that can reach the ESP32 LAN address. The stream is temporary and does not upload or save video. After timeout, normal PIR recording resumes. `sleep_now` leaves the device reachable via MQTT.
 
 ## Upload Format
 
@@ -119,7 +134,7 @@ The Flask server saves the request body, extracts JPEG frames, and writes an MJP
 For better quality:
 
 ```cpp
-const int CAMERA_JPEG_QUALITY = 8;
+const int CAMERA_JPEG_QUALITY = 5;
 ```
 
 For smaller uploads:
@@ -133,10 +148,10 @@ For longer clips:
 
 ```cpp
 const uint32_t CLIP_FRAME_COUNT = 75;
-const size_t MAX_CLIP_BYTES = 6UL * 1024UL * 1024UL;
+const int CAMERA_JPEG_QUALITY = 10;
 ```
 
-Only increase `MAX_CLIP_BYTES` if PSRAM allocation still succeeds.
+Check actual clip sizes and PSRAM headroom before increasing the frame count or `MAX_CLIP_BYTES`.
 
 ## Troubleshooting
 
@@ -156,6 +171,6 @@ The ESP32 did not send the full buffer. Check WiFi signal, server availability, 
 
 Confirm Mosquitto is running on the Pi, the Pi LAN IP is correct in `include/secrets.h`, and port `1883` is reachable from the ESP32 network.
 
-`No motion at boot, entering deep sleep`
+`MQTT command subscription failed`
 
-Normal behavior after cold boot and PIR warmup.
+Check that the broker is reachable and accepts subscriptions to the device command topic.

@@ -17,6 +17,8 @@ This project integrates with the Raspberry Pi IoT platform by publishing MQTT me
 home/devices/birdfeeder-01/status
 home/devices/birdfeeder-01/availability
 home/devices/birdfeeder-01/telemetry
+home/devices/birdfeeder-01/commands
+home/devices/birdfeeder-01/responses
 ```
 
 Availability uses retained plain text:
@@ -32,7 +34,20 @@ Status and telemetry use valid JSON and include the current platform health fiel
 {"device":"birdfeeder-01","type":"status","count":1,"uptime_ms":1000,"wifi_rssi":-55}
 ```
 
-Extra telemetry fields are intentionally included so the Pi dashboard can show clip details in the expandable row.
+Extra telemetry fields are intentionally included so the Pi dashboard can show clip details in the expandable row. The ESP32 sends a status heartbeat every 60 seconds while online.
+
+## Remote Commands
+
+The ESP32 listens on `home/devices/birdfeeder-01/commands` and sends responses on `home/devices/birdfeeder-01/responses`. `record_now` captures and uploads a clip. `sleep_now` puts the camera and PIR recording in standby while MQTT stays online. `stay_awake` resumes normal PIR operation. `stream_on` serves a temporary MJPEG stream from the ESP32 on port 81; default 60 seconds, maximum 180 seconds. PIR recording is paused until streaming ends.
+
+```bash
+mosquitto_pub -h localhost -p 1883 -t 'home/devices/birdfeeder-01/commands' -m '{"device":"birdfeeder-01","command":"record_now"}'
+mosquitto_pub -h localhost -p 1883 -t 'home/devices/birdfeeder-01/commands' -m '{"device":"birdfeeder-01","command":"stream_on","duration_seconds":60}'
+mosquitto_pub -h localhost -p 1883 -t 'home/devices/birdfeeder-01/commands' -m '{"device":"birdfeeder-01","command":"sleep_now"}'
+mosquitto_pub -h localhost -p 1883 -t 'home/devices/birdfeeder-01/commands' -m '{"device":"birdfeeder-01","command":"stay_awake"}'
+```
+
+Do not retain command messages. Open the `stream_url` from a client on the same reachable network. The Flask server remains the destination for recorded clips; it does not proxy the temporary stream.
 
 ## ESP32 Configuration
 
@@ -124,8 +139,8 @@ http://<raspberry-pi-lan-ip>:8080
 Expected dashboard behavior:
 
 - `birdfeeder-01` appears after a valid JSON status or telemetry message.
-- Heartbeat freshness may become `STALE` between triggers because the ESP32 deep sleeps.
-- Availability should show `ONLINE` while awake and `OFFLINE` after intentional sleep.
+- Heartbeat freshness should remain `FRESH` while the ESP32 is powered, connected, and publishing every 60 seconds.
+- Availability should show `ONLINE` while MQTT is connected, including during `sleep_now` standby.
 - Latest clip metadata appears in the expandable telemetry details.
 
 ## Server Verification
@@ -154,5 +169,3 @@ ls -lh /home/zack/projects/Birdfeeder/bird_videos
 
 - Add a systemd service for the Birdfeeder Flask server.
 - Add retention/cleanup for old AVI files.
-- Add command handling only if remote control becomes useful.
-- Add battery voltage telemetry if the hardware exposes a safe ADC measurement.

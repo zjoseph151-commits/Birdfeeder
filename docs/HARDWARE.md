@@ -45,9 +45,9 @@ HC-SR501 OUT  -> XIAO GPIO 2
 
 The firmware configures GPIO 2 as `INPUT_PULLDOWN` and treats motion as `HIGH`.
 
-The HC-SR501 has onboard sensitivity and hold-time trim pots. For bird feeder use, start with a shorter hold time so the ESP32 can return to deep sleep sooner after an upload.
+The HC-SR501 has onboard sensitivity and hold-time trim pots. For bird feeder use, start with a shorter hold time so new motion can be detected sooner after an upload.
 
 ## Power Notes
 
-The ESP32 enters deep sleep between PIR triggers. The camera and WiFi are shut down before sleep. Real-world current draw may still be higher than the ESP32 datasheet value because the XIAO Sense camera hardware and PIR module remain powered.
+The ESP32 stays powered from a regulated 5V wall supply. `sleep_now` is an MQTT standby command: the camera is released and PIR recording is paused, but WiFi and MQTT remain on so another command can wake it.
 

@@ -1,8 +1,8 @@
 # Bird Feeder Camera
 
-Motion-triggered bird feeder camera using a Seeed Studio XIAO ESP32S3 Sense, HC-SR501 PIR sensor, deep sleep, MQTT metadata, and a local Flask video upload server.
+Motion-triggered bird feeder camera using a Seeed Studio XIAO ESP32S3 Sense, HC-SR501 PIR sensor, MQTT control and metadata, and a local Flask video upload server.
 
-The ESP32 wakes on PIR motion, records a fixed-length MJPEG clip into PSRAM, uploads the raw MJPEG bytes to the Raspberry Pi Flask server, publishes compact MQTT status/telemetry metadata to the Raspberry Pi IoT platform, and returns to deep sleep after the PIR signal clears. The server converts the raw MJPEG upload into an AVI file for playback.
+The ESP32 stays powered and connected, records a fixed-length MJPEG clip into PSRAM on PIR motion or MQTT command, uploads the raw MJPEG bytes to the Raspberry Pi Flask server, and publishes MQTT status and clip telemetry. The server converts the raw MJPEG upload into an AVI file for playback.
 
 ## Project Layout
 
@@ -29,7 +29,7 @@ Legacy Arduino sketches and notes are still in the root folder as reference mate
 - HC-SR501 PIR motion sensor
 - 2.4 GHz WiFi network
 - USB-C for programming and testing
-- 5V battery or regulated 5V supply for field use
+- Regulated 5V wall supply
 
 Current PIR wiring:
 
@@ -99,23 +99,24 @@ home/devices/birdfeeder-01/availability
 home/devices/birdfeeder-01/telemetry
 ```
 
-Availability is retained plain text: `online` while awake and `offline` before intentional deep sleep. Status and telemetry are compact JSON objects that include `device`, `type`, `count`, `uptime_ms`, and `wifi_rssi`, plus extra clip details for the dashboard expandable view.
+Availability is retained plain text: `online` while connected and `offline` if the MQTT connection fails unexpectedly. Status and telemetry are compact JSON objects that include `device`, `type`, `count`, `uptime_ms`, and `wifi_rssi`, plus extra clip details for the dashboard expandable view. The ESP32 publishes a status heartbeat every 60 seconds.
 
-Because this device sleeps between triggers, the Pi dashboard heartbeat freshness can become `STALE` between motion events. That is expected.
+Commands go to `home/devices/birdfeeder-01/commands`; responses appear on `home/devices/birdfeeder-01/responses`. `stream_on` serves a temporary MJPEG stream at `http://<esp32-ip>:81/stream` for at most 180 seconds.
 
 ## Current Firmware Behavior
 
-- Cold boot waits for PIR warmup.
+- PIR recording is gated during the 45-second cold boot warmup; MQTT remains available.
 - ESP32 connects to WiFi and MQTT.
-- ESP32 publishes retained `online` availability and a boot/wake status message.
-- If no motion is active, ESP32 publishes sleep status, retained `offline`, and enters deep sleep.
-- PIR `HIGH` wakes the ESP32.
-- ESP32 records `50` VGA JPEG frames at a `200 ms` interval.
-- Clip bytes are stored in a `4 MB` PSRAM/RAM buffer.
+- ESP32 publishes retained `online` availability and a boot status message.
+- PIR `HIGH` triggers recording after confirmation.
+- ESP32 records `50` SVGA JPEG frames at a `200 ms` interval.
+- Clip bytes are stored in a `6 MB` PSRAM/RAM buffer.
 - ESP32 uploads the buffer with a manual HTTP POST.
 - ESP32 publishes MQTT clip telemetry with frame count, byte count, capture time, upload result, and HTTP status.
 - Server converts raw MJPEG to AVI.
-- ESP32 waits for PIR idle, publishes sleep/offline MQTT messages, and returns to deep sleep.
+- ESP32 stays online and waits for PIR idle before accepting the next motion trigger.
+- `sleep_now` pauses PIR recording and releases the camera while keeping MQTT online; `stay_awake` resumes normal operation.
+- `record_now` records one clip from either normal or standby mode. `stream_on` pauses PIR recording until its timeout, then resumes it.
 
 ## Tuning
 
@@ -123,7 +124,7 @@ Common firmware constants live near the top of `src/main.cpp`:
 
 - `CLIP_FRAME_COUNT`: number of frames per trigger
 - `FRAME_INTERVAL_MS`: time between captured frames
-- `CAMERA_FRAME_SIZE`: current value is `FRAMESIZE_VGA`
+- `CAMERA_FRAME_SIZE`: current value is `FRAMESIZE_SVGA`
 - `CAMERA_JPEG_QUALITY`: lower number means better quality and larger clips
 - `MAX_CLIP_BYTES`: maximum in-memory clip size before upload
 - `PIR_COLD_BOOT_WARMUP_MS`: PIR stabilization delay on power-up
